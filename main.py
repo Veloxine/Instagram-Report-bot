@@ -9,6 +9,7 @@ import telebot
 import instaloader
 from flask import Flask
 from dotenv import load_dotenv
+import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
@@ -148,34 +149,6 @@ def analyze(message):
     else:
         bot.reply_to(message, f"❌ Profile {username} not found or an error occurred.")
 
-@bot.message_handler(commands=['broadcast'])
-def broadcast(message):
-    if str(message.chat.id) != ADMIN_ID:
-        bot.reply_to(message, "You are not authorized to use this command.")
-        return
-
-    broadcast_message = message.text[len("/broadcast "):].strip()
-    if not broadcast_message:
-        bot.reply_to(message, "Please provide a message to broadcast.")
-        return
-
-    users = get_all_users()
-    for user in users:
-        try:
-            bot.send_message(user, broadcast_message)
-        except Exception as e:
-            logging.error(f"Failed to send message to {user}: {e}")
-
-@bot.message_handler(commands=['users'])
-def list_users(message):
-    if str(message.chat.id) != ADMIN_ID:
-        bot.reply_to(message, "You are not authorized to use this command.")
-        return
-
-    users = get_all_users()
-    user_list = "\n".join([f"User ID: {user_id}" for user_id in users]) if users else "No users found."
-    bot.reply_to(message, f"List of Users:\n{user_list}")
-
 @bot.message_handler(commands=['restart'])
 def restart_bot(message):
     if str(message.chat.id) != ADMIN_ID:
@@ -189,4 +162,6 @@ def restart_bot(message):
 if __name__ == "__main__":
     print("Starting the bot...")
     logging.info("Bot started.")
-    Thread(target=bot.polling).start()
+    
+    # Fix API Conflict: Use async polling instead of threading
+    asyncio.run(bot.infinity_polling(timeout=10, long_polling_timeout=5))
