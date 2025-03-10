@@ -1,13 +1,10 @@
 import os
 import sys
-import random
 import logging
-import re
-import time
 import requests
+import time
 import instaloader
 import asyncio
-from collections import defaultdict
 from threading import Thread
 import telebot
 from flask import Flask
@@ -33,7 +30,7 @@ def keep_alive():
     t = Thread(target=run_flask_app)
     t.start()
 
-# Start the Flask app in a thread
+# Start Flask app in a separate thread
 keep_alive()
 
 # Initialize Telegram bot
@@ -41,10 +38,10 @@ API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 bot = telebot.TeleBot(API_TOKEN)
 
-# Store temporary session IDs for active users
+# Store active sessions (Temporary)
 active_sessions = {}
 
-# Mapping report types to Instagram's internal reason IDs
+# Instagram Report Types
 REPORT_TYPES = {
     "HATE": 5,
     "SELF": 6,
@@ -56,10 +53,10 @@ REPORT_TYPES = {
     "SPAM": 8
 }
 
-# Function to handle user login
+# **LOGIN TO INSTAGRAM**
 @bot.message_handler(commands=['login'])
 def request_login(message):
-    bot.reply_to(message, "🔐 Send your Instagram login details in this format:\n`username password`", parse_mode="MarkdownV2")
+    bot.reply_to(message, "🔐 Send Instagram login as:\n`username password`", parse_mode="MarkdownV2")
 
 @bot.message_handler(func=lambda message: len(message.text.split()) == 2)
 def handle_login(message):
@@ -68,128 +65,132 @@ def handle_login(message):
     L = instaloader.Instaloader()
 
     try:
-        L.login(username, password)  # Log in to Instagram
+        L.login(username, password)
         cookies = L.context._session.cookies.get_dict()
         session_id = cookies.get("sessionid")
 
         if session_id:
-            active_sessions[message.chat.id] = session_id  # Store session temporarily
-            bot.reply_to(message, "✅ Login successful! Your session is active for this session.")
+            active_sessions[message.chat.id] = session_id
+            bot.reply_to(message, "✅ Login successful!")
         else:
-            bot.reply_to(message, "❌ Error: Could not fetch session ID. Try again.")
+            bot.reply_to(message, "❌ Error fetching session ID. Try again.")
 
     except Exception as e:
         bot.reply_to(message, f"⚠️ Login failed: {e}")
 
-# Function to fetch Instagram profile details
-def get_public_instagram_info(username, session_id):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Cookie": f"sessionid={session_id}"
-    }
+# **FETCH INSTAGRAM PROFILE**
+def get_instagram_info(username, session_id):
+    headers = {"User-Agent": "Mozilla/5.0", "Cookie": f"sessionid={session_id}"}
+    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
 
-    response = requests.get(f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}", headers=headers)
+    for _ in range(3):  # Retry up to 3 times
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            user_data = response.json().get("data", {}).get("user", {})
+            if user_data:
+                return {
+                    "username": user_data.get("username"),
+                    "full_name": user_data.get("full_name"),
+                    "biography": user_data.get("biography"),
+                    "followers": user_data.get("edge_followed_by", {}).get("count"),
+                    "following": user_data.get("edge_follow", {}).get("count"),
+                    "private": user_data.get("is_private"),
+                    "posts": user_data.get("edge_owner_to_timeline_media", {}).get("count"),
+                    "external_url": user_data.get("external_url"),
+                }
+        time.sleep(2)
+    return None
+
+# **SPAM REPORT FUNCTION**
+def report_instagram(username, session_id, report_reason, count=5):
+    headers = {"User-Agent": "Mozilla/5.0", "Cookie": f"sessionid={session_id}"}
+    url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
     
+    response = requests.get(url, headers=headers, timeout=10)
     if response.status_code != 200:
-        return None
-    
-    user_data = response.json().get("data", {}).get("user", {})
-    
-    if not user_data:
-        return None
-    
-    return {
-        "username": user_data.get("username"),
-        "full_name": user_data.get("full_name"),
-        "biography": user_data.get("biography"),
-        "follower_count": user_data.get("edge_followed_by", {}).get("count"),
-        "following_count": user_data.get("edge_follow", {}).get("count"),
-        "is_private": user_data.get("is_private"),
-        "post_count": user_data.get("edge_owner_to_timeline_media", {}).get("count"),
-        "external_url": user_data.get("external_url"),
-    }
-
-# Function to report Instagram accounts with a selected reason
-def report_instagram_account(username, session_id, report_reason, report_count=5):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Cookie": f"sessionid={session_id}"
-    }
-
-    user_info_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
-    response = requests.get(user_info_url, headers=headers)
-    
-    if response.status_code != 200:
-        return f"❌ Error: Could not fetch user info (Error {response.status_code})"
+        return f"❌ Error: Could not fetch user info ({response.status_code})"
 
     user_id = response.json().get("data", {}).get("user", {}).get("id")
-
     if not user_id:
-        return "❌ Error: User not found on Instagram."
+        return "❌ Error: User not found."
 
     report_url = "https://www.instagram.com/api/v1/users/report_user/"
-    success_count = 0
+    success = 0
 
-    for _ in range(report_count):
-        payload = {
-            "user_id": user_id,
-            "reason_id": report_reason,
-            "source_name": "profile"
-        }
-        
-        report_response = requests.post(report_url, headers=headers, data=payload)
-        
-        if report_response.status_code == 200:
-            success_count += 1
+    for _ in range(count):
+        payload = {"user_id": user_id, "reason_id": report_reason, "source_name": "profile"}
+        response = requests.post(report_url, headers=headers, data=payload)
+
+        if response.status_code == 200:
+            success += 1
         else:
-            logging.error(f"❌ Failed to report {username}. Response: {report_response.text}")
+            logging.error(f"❌ Report failed: {response.text}")
+        time.sleep(2)
 
-        time.sleep(2)  # Delay to avoid detection
+    return f"✅ Reported **{username}** {success} times under **{list(REPORT_TYPES.keys())[list(REPORT_TYPES.values()).index(report_reason)]}**."
 
-    return f"✅ Successfully reported **{username}** {success_count} times under **{list(REPORT_TYPES.keys())[list(REPORT_TYPES.values()).index(report_reason)]}**."
-
-# Telegram bot command for reporting
-@bot.message_handler(commands=['spamreport'])
-def spam_report_command(message):
+# **COMMAND: GET PROFILE**
+@bot.message_handler(commands=['getmeth'])
+def getmeth_command(message):
     user_id = message.chat.id
-
     if user_id not in active_sessions:
-        bot.reply_to(message, "⚠️ You must log in first using /login.")
+        bot.reply_to(message, "⚠️ Please log in using /login.")
         return
 
     args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "⚠️ Usage: /getmeth <username>")
+        return
 
+    username = args[1].strip()
+    bot.reply_to(message, f"🔍 Fetching {username}... Please wait.")
+
+    info = get_instagram_info(username, active_sessions[user_id])
+
+    if info:
+        bot.reply_to(message, f"📌 **{info['username']}**\n👤 {info['full_name']}\n📄 {info['biography']}\n👥 {info['followers']} followers\n🔗 {info['external_url']}")
+    else:
+        bot.reply_to(message, "❌ Error fetching profile.")
+
+# **COMMAND: REPORT ACCOUNT**
+@bot.message_handler(commands=['spamreport'])
+def spam_report_command(message):
+    user_id = message.chat.id
+    if user_id not in active_sessions:
+        bot.reply_to(message, "⚠️ Please log in using /login.")
+        return
+
+    args = message.text.split()
     if len(args) < 3:
-        bot.reply_to(message, "⚠️ Usage: /spamreport <username> <report_type> [count]\n\nAvailable report types:\n" + "\n".join(f"- {key}" for key in REPORT_TYPES.keys()))
+        bot.reply_to(message, "⚠️ Usage: /spamreport <username> <report_type> [count]\n📌 Available types:\n" + "\n".join(f"- {key}" for key in REPORT_TYPES.keys()))
         return
 
     username = args[1].strip()
     report_type = args[2].strip().upper()
-    count = int(args[3]) if len(args) > 3 and args[3].isdigit() else 5  # Default: 5 reports
+    count = int(args[3]) if len(args) > 3 and args[3].isdigit() else 5
 
     if report_type not in REPORT_TYPES:
-        bot.reply_to(message, "⚠️ Invalid report type! Available types:\n" + "\n".join(f"- {key}" for key in REPORT_TYPES.keys()))
+        bot.reply_to(message, "⚠️ Invalid report type!\n📌 Available types:\n" + "\n".join(f"- {key}" for key in REPORT_TYPES.keys()))
         return
 
-    bot.reply_to(message, f"🚨 Reporting **{username}** {count} times under **{report_type}**... Please wait.")
+    bot.reply_to(message, f"🚨 Reporting **{username}** {count} times under **{report_type}**...")
 
-    result = report_instagram_account(username, active_sessions[user_id], REPORT_TYPES[report_type], count)
-
+    result = report_instagram(username, active_sessions[user_id], REPORT_TYPES[report_type], count)
     bot.reply_to(message, result)
 
-# Help command
+# **COMMAND: HELP MENU**
 @bot.message_handler(commands=['help'])
 def help_command(message):
-    help_text = (
-        "📌 **Available Commands:**\n\n"
-        "🔹 `/login <username> <password>` - Log in to Instagram (temporary session).\n"
-        "🔹 `/getmeth <username>` - Fetch Instagram profile details.\n"
-        "🔹 `/spamreport <username> <report_type> <count>` - Report an account multiple times.\n"
-        "🔹 **Report Types:**\n" + "\n".join(f"- {key}" for key in REPORT_TYPES.keys())
-    )
-    bot.reply_to(message, help_text, parse_mode='MarkdownV2')
+    bot.reply_to(message, "📌 **Commands:**\n/login - Log in\n/getmeth <username> - Get profile\n/spamreport <username> <type> <count> - Report user")
 
+# **SAFE BOT POLLING**
 if __name__ == "__main__":
-    print("Starting the bot...")
+    print("Bot starting...")
     logging.info("Bot started.")
-    asyncio.run(bot.infinity_polling(timeout=10, long_polling_timeout=5))
+    
+    while True:
+        try:
+            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        except requests.exceptions.ConnectionError:
+            logging.error("🔴 Connection lost. Restarting...")
+            time.sleep(5)
