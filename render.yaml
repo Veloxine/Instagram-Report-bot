@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: veloxine-bot
+    env: node
+    region: oregon  # Change to your preferred region
+    plan: free  # Use "starter" or "pro" for paid plans
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: DATABASE_URL
+        value: mongodb+srv://veloxineology:velox%40124@veloxine.d2lwq.mongodb.net/veloxineology?retryWrites=true&w=majority&appName=veloxine
+      - key: NODE_VERSION
+        value: 18  # Change based on your Node.js version
